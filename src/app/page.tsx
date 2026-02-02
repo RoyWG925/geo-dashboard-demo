@@ -1,75 +1,84 @@
 // src/app/page.tsx
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { runGeoPipeline, getKeywordsFromExcel, GeoAnalysisResult } from './actions';
+import { 
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell 
+} from 'recharts';
 
-// 定義一個狀態介面，用來儲存每個關鍵字的分析結果
-type ResultMap = Record<string, GeoAnalysisResult>;
+type ResultMap = Record<string, GeoAnalysisResult & { duration?: number }>;
 
 export default function GeoDashboard() {
-  // 1. 關鍵字清單 (從 Excel 讀來)
   const [keywords, setKeywords] = useState<string[]>([]);
-  
-  // 2. 當前選中的關鍵字
+  const [searchQuery, setSearchQuery] = useState(""); 
+  const [newKeywordInput, setNewKeywordInput] = useState("");
   const [selectedKw, setSelectedKw] = useState<string | null>(null);
-  
-  // 3. 所有分析結果的緩存 (Key 是關鍵字, Value 是結果)
   const [results, setResults] = useState<ResultMap>({});
   
-  // 4. 系統狀態
   const [loading, setLoading] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true); // 手機版用
-
-  // 初始化：畫面一載入，就去 Server 讀 Excel
-  useEffect(() => {
-    async function init() {
-      addLog("📂 正在讀取 Excel 檔案...");
-      try {
-        const kws = await getKeywordsFromExcel();
-        if (kws && kws.length > 0 && !kws[0].startsWith("Error")) {
-          setKeywords(kws);
-          setSelectedKw(kws[0]); // 預設選中第一個
-          addLog(`✅ 成功載入 ${kws.length} 個關鍵字`);
-        } else {
-          addLog("❌ Excel 讀取失敗或為空");
-          // Fallback: 如果真的讀不到，給一個預設值測試用
-          setKeywords(["滴雞精推薦 (Fallback)"]); 
-          setSelectedKw("滴雞精推薦 (Fallback)");
-        }
-      } catch (e) {
-        addLog("❌ 連線錯誤");
-      }
-    }
-    init();
-  }, []);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   const addLog = (msg: string) => {
     setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev]);
   };
 
-  // 執行單一關鍵字分析
+  useEffect(() => {
+    async function init() {
+      addLog("📂 系統啟動: 正在讀取 Excel 完整清單...");
+      try {
+        const kws = await getKeywordsFromExcel();
+        if (kws && kws.length > 0 && !kws[0].startsWith("Error")) {
+          setKeywords(kws);
+          addLog(`✅ 讀取成功: 共載入 ${kws.length} 個關鍵字`);
+        } else {
+          addLog("❌ Excel 讀取異常，切換至備用清單");
+          setKeywords(["滴雞精推薦", "葉黃素功效", "益生菌怎麼吃", "魚油推薦", "維他命C"]); 
+        }
+      } catch (e: any) {
+        addLog(`❌ 連線錯誤: ${e.message}`);
+      }
+    }
+    init();
+  }, []);
+
+  const handleAddKeyword = () => {
+    if (!newKeywordInput.trim()) return;
+    const newKw = newKeywordInput.trim();
+    if (!keywords.includes(newKw)) {
+      setKeywords(prev => [newKw, ...prev]);
+      addLog(`➕ 已手動新增關鍵字: "${newKw}"`);
+    }
+    setSelectedKw(newKw);
+    setNewKeywordInput("");
+  };
+
   const handleAnalyze = async () => {
     if (!selectedKw || loading) return;
     
     setLoading(true);
-    addLog(`🚀 開始分析: ${selectedKw}`);
+    addLog(`🚀 [Start] 開始分析: ${selectedKw}`);
+    
+    // ⏱️ 開始計時
+    const startTime = performance.now();
     
     try {
-      // 呼叫 Server Action
       const result = await runGeoPipeline(selectedKw);
       
-      // 更新結果緩存 (這樣切換回來時資料還在)
-      setResults(prev => ({
-        ...prev,
-        [selectedKw]: result
+      // ⏱️ 結束計時
+      const endTime = performance.now();
+      const duration = Math.round(endTime - startTime); // 毫秒
+
+      setResults(prev => ({ 
+        ...prev, 
+        [selectedKw]: { ...result, duration } 
       }));
 
       if (result.status === 'success') {
-        addLog(`✅ 分析完成: ${selectedKw} (Model: ${result.usedModel})`);
+        addLog(`✅ [Success] ${selectedKw} 完成 (耗時: ${duration}ms)`);
       } else {
-        addLog(`❌ 分析失敗: ${result.errorMessage}`);
+        addLog(`❌ [Failed] ${selectedKw} 失敗: ${result.errorMessage}`);
       }
 
     } catch (e: any) {
@@ -79,188 +88,200 @@ export default function GeoDashboard() {
     }
   };
 
-  // 取得當前選中關鍵字的結果 (如果有跑過的話)
+  const filteredKeywords = useMemo(() => {
+    return keywords.filter(k => k.toLowerCase().includes(searchQuery.toLowerCase()));
+  }, [keywords, searchQuery]);
+
   const currentResult = selectedKw ? results[selectedKw] : null;
 
+  const chartData = keywords.map(kw => {
+    const res = results[kw];
+    return {
+      name: kw,
+      count: res?.status === 'success' ? res.paa.length : 0,
+      status: res?.status || 'pending'
+    };
+  });
+
+  // 🟢 GEO Compliance Check Function (前端驗證)
+  //  - 這裡是用程式邏輯實現這個概念
+  const checkCompliance = (content: string) => {
+    return {
+      hasTable: content.includes('|') && content.includes('---'),
+      hasBullet: content.includes('- ') || content.includes('* '),
+      hasHeading: content.includes('## '),
+      hasBLUF: content.length > 0 && !content.startsWith('#') // 簡單檢查是否直接開始回答
+    };
+  };
+
+  const compliance = currentResult?.content ? checkCompliance(currentResult.content) : null;
+
   return (
-    <div className="flex h-screen bg-slate-50 font-sans text-slate-900 overflow-hidden">
+    <div className="flex h-screen bg-slate-100 font-sans text-slate-900 overflow-hidden">
       
-      {/* --- 左側 Sidebar (關鍵字清單) --- */}
-      <div className={`
-        ${isSidebarOpen ? 'w-64' : 'w-0'} 
-        bg-slate-900 text-slate-300 transition-all duration-300 flex flex-col border-r border-slate-800
-      `}>
-        <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950">
-          <h2 className="font-bold text-white tracking-wider">DATA SOURCE</h2>
-        </div>
-        
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {keywords.length === 0 && <div className="text-sm text-slate-500 p-4 text-center">讀取中...</div>}
-          
-          {keywords.map((kw) => (
-            <button
-              key={kw}
-              onClick={() => setSelectedKw(kw)}
-              className={`
-                w-full text-left px-4 py-3 rounded-lg text-sm transition-all
-                ${selectedKw === kw 
-                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50 font-medium' 
-                  : 'hover:bg-slate-800 text-slate-400'}
-              `}
-            >
-              {kw}
-              {/* 如果這個關鍵字已經跑過，顯示一個綠色小點 */}
-              {results[kw]?.status === 'success' && (
-                <span className="float-right w-2 h-2 mt-1.5 rounded-full bg-green-400"></span>
-              )}
-            </button>
-          ))}
-        </div>
-
-        {/* 底部 Log 預覽 */}
-        <div className="p-4 bg-slate-950 text-xs font-mono border-t border-slate-800 h-48 overflow-y-auto">
-           <div className="text-slate-500 mb-2 font-bold">TERMINAL LOGS</div>
-           {logs.map((log, i) => (
-             <div key={i} className="mb-1 truncate text-slate-400 border-l-2 border-slate-700 pl-2">
-               {log}
-             </div>
-           ))}
-        </div>
-      </div>
-
-      {/* --- 右側 Main Content (工作區) --- */}
-      <div className="flex-1 flex flex-col h-screen overflow-hidden">
-        
-        {/* Top Header */}
-        <header className="bg-white border-b border-slate-200 p-4 flex justify-between items-center shadow-sm z-10">
-          <div className="flex items-center gap-4">
-            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 hover:bg-slate-100 rounded text-slate-500">
-              ☰
-            </button>
-            <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-700 to-indigo-600">
-              GEO Analytics Dashboard
-            </h1>
+      {/* Sidebar */}
+      <aside className={`${isSidebarOpen ? 'w-80 translate-x-0' : 'w-0 -translate-x-full opacity-0'} bg-slate-900 text-slate-300 transition-all duration-300 flex flex-col border-r border-slate-800 z-20`}>
+        <div className="p-5 border-b border-slate-800 bg-slate-950 shrink-0 space-y-4">
+          <h2 className="font-bold text-white tracking-wider text-sm">DATASETS ({keywords.length})</h2>
+          <div className="flex gap-2">
+            <input type="text" placeholder="輸入關鍵字..." value={newKeywordInput} onChange={(e) => setNewKeywordInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleAddKeyword()} className="w-full bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded px-2 py-2 outline-none focus:border-blue-500" />
+            <button onClick={handleAddKeyword} className="bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 rounded font-bold">Add</button>
           </div>
-          <div className="text-sm text-slate-500">
-             Current Model: <span className="font-mono bg-slate-100 px-2 py-1 rounded">Gemini 3 Flash</span>
+          <div className="relative">
+            <input type="text" placeholder="過濾清單..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full bg-slate-900 border border-slate-700 text-slate-400 text-xs rounded px-2 py-1.5 outline-none" />
+            {searchQuery && <button onClick={() => setSearchQuery("")} className="absolute right-2 top-1.5 text-slate-500">✕</button>}
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700">
+          <div className="flex flex-col p-2 space-y-1">
+            {filteredKeywords.map((kw) => {
+              const res = results[kw];
+              return (
+                <button key={kw} onClick={() => setSelectedKw(kw)} className={`w-full text-left px-4 py-3 rounded-lg text-sm transition-all flex justify-between items-center ${selectedKw === kw ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400'}`}>
+                  <span className="truncate pr-4">{kw}</span>
+                  {res?.status === 'success' && <span className="w-2 h-2 rounded-full bg-green-400"></span>}
+                  {res?.status === 'error' && <span className="w-2 h-2 rounded-full bg-red-500"></span>}
+                  {loading && selectedKw === kw && !res && <span className="w-2 h-2 rounded-full bg-yellow-400 animate-ping"></span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="h-48 bg-black border-t border-slate-800 shrink-0 flex flex-col">
+           <div className="px-4 py-2 bg-slate-950 text-xs font-bold text-slate-500 flex justify-between"><span>SYSTEM LOGS</span><button onClick={()=>setLogs([])}>Clear</button></div>
+           <div className="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-1">
+             {logs.map((log, i) => <div key={i} className={`truncate ${log.includes('✅')?'text-green-500':log.includes('❌')?'text-red-500':'text-slate-400'}`}>{log}</div>)}
+           </div>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <main className="flex-1 flex flex-col h-screen overflow-hidden bg-slate-50">
+        <header className="bg-white border-b border-slate-200 h-16 flex items-center justify-between px-6 shrink-0 shadow-sm z-10">
+          <div className="flex items-center gap-4">
+            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 hover:bg-slate-100 rounded text-slate-600">☰</button>
+            <h1 className="text-lg font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-700 to-indigo-600">GEO Analytics Dashboard</h1>
+          </div>
+          <div className="flex items-center gap-3">
+             <div className="text-xs text-right hidden sm:block">
+                <p className="text-slate-900 font-bold">{currentResult?.usedModel || 'Pending...'}</p>
+                <p className="text-slate-400">Active Model</p>
+             </div>
+             <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold shadow-lg ${loading ? 'bg-yellow-500 animate-pulse' : 'bg-gradient-to-tr from-blue-500 to-purple-600'}`}>AI</div>
           </div>
         </header>
 
-        {/* 主要內容捲動區 */}
-        <main className="flex-1 overflow-y-auto p-6 md:p-10 bg-slate-50">
+        <div className="flex-1 overflow-y-auto p-6 md:p-10 scrollbar-thin scrollbar-thumb-slate-300">
+          
+          {/* Chart Section */}
+          <div className="mb-8 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider">Dataset Overview (PAA Count)</h3>
+              <span className="text-xs text-slate-400">Y-Axis: Questions Found</span>
+            </div>
+            <div className="h-48 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                  <XAxis dataKey="name" hide />
+                  <YAxis tick={{fontSize:12, fill:'#94a3b8'}} axisLine={false} tickLine={false} />
+                  <Tooltip contentStyle={{borderRadius:'8px', border:'none', boxShadow:'0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
+                  <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                    {chartData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.status === 'success' ? '#4f46e5' : '#e2e8f0'} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
           
           {!selectedKw ? (
-            <div className="h-full flex flex-col items-center justify-center text-slate-400">
-              <span className="text-6xl mb-4">👈</span>
-              <p>請從左側選單選擇一個關鍵字開始分析</p>
-            </div>
+            <div className="text-center py-10 text-slate-400">請選擇關鍵字以開始分析</div>
           ) : (
-            <div className="max-w-5xl mx-auto space-y-6">
-              
-              {/* 1. 控制台與標題 */}
-              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+            <div className="max-w-6xl mx-auto space-y-8 animate-fade-in">
+              <div className="flex justify-between items-end border-b border-slate-200 pb-6">
                 <div>
-                   <h2 className="text-3xl font-bold text-slate-800">{selectedKw}</h2>
-                   <p className="text-slate-500 text-sm mt-1">
-                     狀態: {currentResult ? (currentResult.status === 'success' ? '✅ 分析完成' : '❌ 發生錯誤') : '⚪ 等待執行'}
-                   </p>
+                   <h2 className="text-4xl font-extrabold text-slate-800">{selectedKw}</h2>
+                   <div className="flex items-center gap-2 mt-2">
+                     <span className={`w-2.5 h-2.5 rounded-full ${currentResult?.status === 'success' ? 'bg-green-500' : 'bg-slate-300'}`}></span>
+                     <span className="text-sm text-slate-500">{currentResult?.status === 'success' ? `Analysis Complete (${currentResult.duration}ms)` : 'Ready'}</span>
+                   </div>
                 </div>
-                
-                <button
-                  onClick={handleAnalyze}
-                  disabled={loading}
-                  className={`
-                    px-6 py-3 rounded-lg font-bold shadow-md transition-all flex items-center gap-2
-                    ${loading 
-                      ? 'bg-slate-200 text-slate-500 cursor-not-allowed' 
-                      : 'bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg'}
-                  `}
-                >
-                  {loading ? (
-                    <>
-                      <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                      執行 Pipeline 中...
-                    </>
-                  ) : (
-                    <>🚀 執行 GEO 分析</>
-                  )}
+                <button onClick={handleAnalyze} disabled={loading} className={`px-8 py-3 rounded-xl font-bold text-sm shadow-lg text-white ${loading ? 'bg-slate-300' : 'bg-blue-600 hover:bg-blue-700'}`}>
+                  {loading ? "Processing..." : "🚀 執行 GEO 分析"}
                 </button>
               </div>
 
-              {/* 2. 分析結果顯示區 */}
               {currentResult && currentResult.status === 'success' && (
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in-up">
+                <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
                   
-                  {/* 左欄: 真實數據 (Apify) */}
-                  <div className="lg:col-span-1 space-y-6">
-                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                       <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4 border-b pb-2">
-                         真實 PAA 數據 (Google)
+                  {/* Left Column */}
+                  <div className="xl:col-span-1 space-y-6">
+                    
+                    {/* 🟢 GEO Compliance Score Card (新增的必殺技) */}
+                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                       <h3 className="text-xs font-bold text-indigo-500 uppercase tracking-wider mb-4 flex items-center gap-2">
+                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                         GEO Optimization Score
                        </h3>
-                       <div className="flex flex-wrap gap-2">
-                         {currentResult.paa.length > 0 ? currentResult.paa.map((q, i) => (
-                           <div key={i} className="text-sm bg-slate-50 text-slate-700 p-3 rounded-lg border border-slate-100 w-full hover:border-blue-200 transition-colors">
-                             ❓ {q}
-                           </div>
-                         )) : (
-                            <div className="text-slate-400 italic text-sm">此關鍵字無 PAA 數據</div>
-                         )}
+                       <div className="space-y-3">
+                          <div className="flex justify-between items-center text-sm">
+                            <span className="text-slate-600">Markdown Table</span>
+                            {compliance?.hasTable ? <span className="text-green-600 font-bold bg-green-50 px-2 rounded">Pass ✅</span> : <span className="text-red-400">Missing ❌</span>}
+                          </div>
+                          <div className="flex justify-between items-center text-sm">
+                            <span className="text-slate-600">Bullet Points</span>
+                            {compliance?.hasBullet ? <span className="text-green-600 font-bold bg-green-50 px-2 rounded">Pass ✅</span> : <span className="text-red-400">Missing ❌</span>}
+                          </div>
+                          <div className="flex justify-between items-center text-sm">
+                            <span className="text-slate-600">H2/H3 Structure</span>
+                            {compliance?.hasHeading ? <span className="text-green-600 font-bold bg-green-50 px-2 rounded">Pass ✅</span> : <span className="text-red-400">Missing ❌</span>}
+                          </div>
+                          <div className="flex justify-between items-center text-sm">
+                            <span className="text-slate-600">BLUF Format</span>
+                            {compliance?.hasBLUF ? <span className="text-green-600 font-bold bg-green-50 px-2 rounded">Pass ✅</span> : <span className="text-red-400">Missing ❌</span>}
+                          </div>
                        </div>
                     </div>
 
-                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                       <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4 border-b pb-2">
-                         Meta Info
-                       </h3>
-                       <div className="space-y-2 text-sm">
-                          <div className="flex justify-between">
-                            <span className="text-slate-500">Model:</span>
-                            <span className="font-mono text-indigo-600 bg-indigo-50 px-2 rounded">{currentResult.usedModel}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-slate-500">Storage:</span>
-                            <span className="text-green-600">Supabase ✅</span>
-                          </div>
+                    {/* Stats Card */}
+                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                       <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Pipeline Stats</h3>
+                       <div className="space-y-3 text-sm">
+                          <div className="flex justify-between"><span className="text-slate-500">AI Model</span><span className="font-mono text-indigo-600 bg-indigo-50 px-2 rounded">{currentResult.usedModel}</span></div>
+                          <div className="flex justify-between"><span className="text-slate-500">Apify Status</span><span className="text-green-600 font-medium">Active</span></div>
+                          <div className="flex justify-between"><span className="text-slate-500">Database</span><span className="text-green-600 font-medium">Saved</span></div>
+                          <div className="flex justify-between"><span className="text-slate-500">Duration</span><span className="text-slate-900 font-bold">{currentResult.duration}ms</span></div>
+                       </div>
+                    </div>
+
+                    {/* PAA Card */}
+                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                       <div className="flex justify-between items-center mb-4">
+                         <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">PAA Questions</h3>
+                         <span className="text-xs bg-slate-100 text-slate-500 px-2 py-1 rounded-full">{currentResult.paa.length}</span>
+                       </div>
+                       <div className="flex flex-col gap-2">
+                         {currentResult.paa.length > 0 ? currentResult.paa.map((q, i) => <div key={i} className="text-sm text-slate-700 bg-slate-50 p-2 rounded border border-slate-100">{q}</div>) : <div className="text-slate-400 italic text-sm text-center">無 PAA 數據</div>}
                        </div>
                     </div>
                   </div>
 
-                  {/* 右欄: GEO 內容 (Gemini) */}
-                  <div className="lg:col-span-2">
-                    <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-200 min-h-[500px]">
-                      <h3 className="text-xs font-bold text-indigo-500 uppercase tracking-wider mb-6 flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-indigo-500"></span>
-                        GEO Optimized Content
-                      </h3>
-                      
-                      {/* 內容渲染區 */}
-                      <article className="prose prose-slate max-w-none prose-headings:text-slate-800 prose-p:text-slate-600 prose-li:text-slate-600">
-                        {/* 簡單的 Markdown 渲染，保留換行與空白 */}
-                        <div className="whitespace-pre-wrap font-sans text-base leading-relaxed">
-                          {currentResult.content}
-                        </div>
+                  {/* Right Column: Content */}
+                  <div className="xl:col-span-2">
+                    <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-100 min-h-[600px]">
+                      <h3 className="font-bold text-slate-800 mb-6 border-b pb-4">Optimized Content</h3>
+                      <article className="prose prose-slate prose-lg max-w-none">
+                        <div className="whitespace-pre-wrap font-sans text-base leading-relaxed">{currentResult.content}</div>
                       </article>
                     </div>
                   </div>
-
                 </div>
               )}
-              
-              {/* 錯誤顯示 */}
-              {currentResult && currentResult.status === 'error' && (
-                <div className="bg-red-50 border-l-4 border-red-500 p-6 rounded-lg">
-                  <h3 className="text-red-800 font-bold">Pipeline Error</h3>
-                  <p className="text-red-600 mt-2">{currentResult.errorMessage}</p>
-                </div>
-              )}
-
+              {currentResult?.status === 'error' && <div className="bg-red-50 border border-red-200 p-8 rounded-2xl text-center"><h3 className="text-red-900 font-bold">Failed</h3><p className="text-red-700 mt-2">{currentResult.errorMessage}</p></div>}
             </div>
           )}
-        </main>
-      </div>
+        </div>
+      </main>
     </div>
   );
 }

@@ -19,23 +19,20 @@ export interface GeoAnalysisResult {
   usedModel?: string;
 }
 
-// 1. 讀取 Excel (保持不變)
+// 1. 讀取 Excel (無數量限制)
 export async function getKeywordsFromExcel() {
   try {
     const filePath = path.join(process.cwd(), 'data.xlsx'); 
-    if (!fs.existsSync(filePath)) {
-      console.error(`❌ 找不到檔案: ${filePath}`);
-      return ["Error: Excel_Not_Found"];
-    }
+    if (!fs.existsSync(filePath)) return ["Error: Excel_Not_Found"];
     const fileBuffer = fs.readFileSync(filePath);
     const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
     const sheetName = workbook.SheetNames[0]; 
     const sheet = workbook.Sheets[sheetName];
     const data = XLSX.utils.sheet_to_json(sheet);
     // @ts-ignore
-    return data.map(row => row.Keyword).filter(k => k).slice(0, 5) as string[];
+    return data.map(row => row.Keyword).filter(k => k) as string[];
   } catch (error) {
-    console.error("❌ Excel 讀取失敗:", error);
+    console.error("Excel Error:", error);
     return [];
   }
 }
@@ -46,14 +43,13 @@ export async function runGeoPipeline(keyword: string): Promise<GeoAnalysisResult
   const supabase = await createClient();
   let usedModel = "";
 
-  // --- A. Apify PAA ---
+  // --- A. Apify PAA (資料蒐集) ---
   let paaQuestions: string[] = [];
   try {
     const token = process.env.APIFY_API_TOKEN;
     if (!token) throw new Error("Missing APIFY_API_TOKEN");
 
     const client = new ApifyClient({ token: token });
-    // 使用官方 google-search-scraper
     const run = await client.actor("apify/google-search-scraper").call({
       queries: keyword, 
       countryCode: "tw",
@@ -73,110 +69,96 @@ export async function runGeoPipeline(keyword: string): Promise<GeoAnalysisResult
         paaQuestions = rawPaa.map(p => p.question).filter(q => q);
       }
     }
-    
-    if (paaQuestions.length === 0) {
-       console.warn(`⚠️ 警告: 關鍵字 "${keyword}" 未抓取到 PAA`);
-    }
-
   } catch (error: any) {
     console.error("❌ Apify 失敗:", error.message);
-    return {
-        keyword, paa: [], content: "", status: 'error',
-        errorMessage: `Apify Failed: ${error.message}`
-    };
+    return { keyword, paa: [], content: "", status: 'error', errorMessage: error.message };
   }
 
-  // --- B. AI Pipeline (根據 2026/02 最新情報修正) ---
+  // --- B. AI Pipeline (重點修改區域) ---
   let draftContent = "";
   let finalContent = "";
 
-  // 🟢 關鍵修正：根據你提供的最新情報，使用免費 Tier 支援的模型
-  const modelsToTry = [
-    'gemini-3-flash-preview',  // 首選：最新、最快、免費
-    'gemini-2.5-flash',        // 備援：穩定版
-    'gemini-2.5-pro',          // 最後手段：免費但有限制
-  ];
+  const modelsToTry = ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.5-pro'];
 
   try {
+    // 步驟 1: LLM 原始回答 (Raw Generation)
     const paaContext = paaQuestions.length > 0 
       ? `Real User Questions (PAA): ${paaQuestions.join(', ')}` 
       : `Note: No PAA data found. Infer user intent from keyword directly.`;
 
-    // Stage 1: Drafting (生成初稿)
     const draftPrompt = `
-      Task: Generate a comprehensive answer for: "${keyword}".
+      Task: Provide a detailed, factual answer for the keyword: "${keyword}".
       Context: ${paaContext}
-      Goal: Detailed, factual response.
-      Tone: Helpful and authoritative.
+      Requirement: Output in Traditional Chinese (Taiwan).
+      Goal: Detailed, factual response without specific formatting constraints.
     `;
 
     for (const modelId of modelsToTry) {
       try {
-        console.log(`🤖 Stage 1 using: ${modelId}...`);
+        console.log(`🤖 Stage 1 (Drafting) using: ${modelId}...`);
         const { text } = await generateText({
           model: google(modelId),
           prompt: draftPrompt,
         });
         draftContent = text;
         usedModel = modelId;
-        break; // 成功就跳出
+        break; 
       } catch (e: any) {
         console.warn(`⚠️ ${modelId} failed: ${e.message}`);
         if (modelId === modelsToTry[modelsToTry.length - 1]) throw e;
       }
     }
 
-    // Stage 2: Refining (GEO 優化)
-    // 雖然是用 Flash 模型，我們透過 Prompt 讓它扮演 GEO 專家
+    // 步驟 2: GEO Optimization (採納專業級建議)
     const refinePrompt = `
-      You are an expert in GEO (Generative Engine Optimization).
-      Your task is to rewrite the content to be favored by AI search engines (like Gemini 3 Pro).
+      You are a **GEO (Generative Engine Optimization) Architect**.
+
+      **Goal:**
+      Rewrite the source content to match the preferred formats of AI Search Engines (e.g., ChatGPT Search, Google AI Overviews, Perplexity).
+
+      **AI-Preferred Content Principles:**
+      1. **Scannable:** Use bullet points and bold keywords.
+      2. **Direct:** Apply the BLUF (Bottom Line Up Front) principle.
+      3. **Structured:** Use clear H2 / H3 hierarchy.
+      4. **Decision-Oriented:** Use tables for comparison when applicable.
+
+      **Action:**
+      Rewrite the source content by strictly applying the rules below.
 
       **Source Content:**
       ${draftContent}
 
-      **Strict Optimization Rules:**
-      1. **BLUF:** Start with a direct answer in < 40 words.
-      2. **Structure:** Use clear H2/H3 headings.
-      3. **Visuals:** You MUST create a Markdown Comparison Table.
-      4. **Lists:** Use bullet points for readability.
+      **Strict Constraints:**
+      - **Language:** Traditional Chinese (Taiwan) / 繁體中文.
+      - **Output Format:** Markdown only.
+      - **Summary:** Start with a BLUF summary of **no more than 80 Chinese characters**.
+      - **Table:** Include **exactly one Markdown comparison table** (minimum 3 columns: Aspect / Option A / Option B or equivalent).
+      - **Integrity:** If specific products or data are missing, perform **conceptual comparison only**. **Do NOT fabricate details.**
     `;
 
-    console.log(`✨ Stage 2 using: ${usedModel}...`);
+    console.log(`✨ Stage 2 (GEO Refining) using: ${usedModel}...`);
     const { text: refinedText } = await generateText({
-      model: google(usedModel), // 沿用剛剛成功的模型
+      model: google(usedModel),
       prompt: refinePrompt,
     });
 
     finalContent = refinedText;
 
   } catch (error: any) {
-    console.error("❌ AI Pipeline 失敗:", error);
-    return {
-        keyword, paa: paaQuestions, content: "", status: 'error',
-        errorMessage: `AI Failed: ${error.message}`
-    };
+    return { keyword, paa: paaQuestions, content: "", status: 'error', errorMessage: error.message };
   }
 
   // --- C. Supabase Write ---
   try {
-    const { error } = await supabase
-      .from('geo_analysis_results')
-      .insert({
-        keyword: keyword,
-        paa_questions: paaQuestions, 
-        geo_optimized_content: finalContent
-      });
-
+    const { error } = await supabase.from('geo_analysis_results').insert({
+      keyword: keyword,
+      paa_questions: paaQuestions, 
+      geo_optimized_content: finalContent
+    });
     if (error) console.error("Supabase Error:", error);
   } catch (e) { console.error("DB Error:", e); }
 
   return {
-    keyword,
-    paa: paaQuestions,
-    content: finalContent,
-    draftContent: draftContent,
-    status: 'success',
-    usedModel: usedModel
+    keyword, paa: paaQuestions, content: finalContent, draftContent, status: 'success', usedModel
   };
 }
