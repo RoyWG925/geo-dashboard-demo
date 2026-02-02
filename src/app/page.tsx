@@ -1,246 +1,265 @@
 // src/app/page.tsx
 'use client';
 
-import { useState } from 'react';
-// 👇 引入真正的讀檔函式 (getKeywordsFromExcel) 和 執行函式 (runGeoPipeline)
+import { useState, useEffect } from 'react';
 import { runGeoPipeline, getKeywordsFromExcel, GeoAnalysisResult } from './actions';
-import ReactMarkdown from 'react-markdown'; // 如果你有裝這個，沒裝的話下面用 CSS 顯示也可以
+
+// 定義一個狀態介面，用來儲存每個關鍵字的分析結果
+type ResultMap = Record<string, GeoAnalysisResult>;
 
 export default function GeoDashboard() {
+  // 1. 關鍵字清單 (從 Excel 讀來)
+  const [keywords, setKeywords] = useState<string[]>([]);
+  
+  // 2. 當前選中的關鍵字
+  const [selectedKw, setSelectedKw] = useState<string | null>(null);
+  
+  // 3. 所有分析結果的緩存 (Key 是關鍵字, Value 是結果)
+  const [results, setResults] = useState<ResultMap>({});
+  
+  // 4. 系統狀態
   const [loading, setLoading] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
-  const [results, setResults] = useState<GeoAnalysisResult[]>([]);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true); // 手機版用
 
-  const addLog = (message: string) => {
-    setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${message}`]);
-  };
-
-  const handleRun = async () => {
-    if (loading) return;
-    setLoading(true);
-    setLogs([]);
-    setResults([]);
-    
-    addLog("🚀 系統初始化...");
-    addLog("📡 連線 Server Action: 準備讀取 Excel 檔案...");
-
-    let keywords: string[] = [];
-
-    try {
-      // 🟢 真實動作：呼叫後端讀取 Excel
-      const serverData = await getKeywordsFromExcel();
-      
-      // 檢查回傳結果
-      if (!serverData || serverData.length === 0) {
-        addLog("❌ 錯誤: Excel 檔案為空或讀取失敗");
-        setLoading(false);
-        return;
-      }
-
-      // 檢查是否為後端回傳的錯誤訊息 (例如檔案不存在)
-      if (serverData[0].startsWith("Error:")) {
-        addLog(`❌ 嚴重錯誤: 伺服器回報 ${serverData[0]}`);
-        addLog("💡 提示: 請確認 data.xlsx 是否有 Git Push 到儲存庫中");
-        setLoading(false);
-        return;
-      }
-
-      // 成功讀取
-      keywords = serverData;
-      addLog(`✅ Excel 讀取成功！偵測到 ${keywords.length} 個關鍵字: [${keywords.join(', ')}]`);
-
-    } catch (error: any) {
-      addLog(`❌ 連線錯誤: ${error.message}`);
-      setLoading(false);
-      return;
-    }
-
-    // 🟢 真實動作：針對 Excel 裡的每一個字執行 Pipeline
-    for (const kw of keywords) {
-      addLog(`⚡ ------------------------------------------------`);
-      addLog(`⚡ 開始執行分析: "${kw}"`);
-      addLog(`🕷️ 呼叫 Apify 爬蟲 (Real-Time SERP)...`);
-      
+  // 初始化：畫面一載入，就去 Server 讀 Excel
+  useEffect(() => {
+    async function init() {
+      addLog("📂 正在讀取 Excel 檔案...");
       try {
-        const res = await runGeoPipeline(kw);
-        
-        if (res.status === 'success') {
-          addLog(`✅ Apify: 抓取完成 (PAA: ${res.paa.length} 筆)`);
-          addLog(`🤖 AI: 生成完成 (Model: ${res.usedModel})`);
-          addLog(`💾 DB: 寫入 Supabase 成功`);
-          setResults(prev => [res, ...prev]);
+        const kws = await getKeywordsFromExcel();
+        if (kws && kws.length > 0 && !kws[0].startsWith("Error")) {
+          setKeywords(kws);
+          setSelectedKw(kws[0]); // 預設選中第一個
+          addLog(`✅ 成功載入 ${kws.length} 個關鍵字`);
         } else {
-          addLog(`❌ Pipeline 失敗: ${res.errorMessage}`);
-          // 失敗也要顯示出來，證明不是假資料
-          setResults(prev => [res, ...prev]);
+          addLog("❌ Excel 讀取失敗或為空");
+          // Fallback: 如果真的讀不到，給一個預設值測試用
+          setKeywords(["滴雞精推薦 (Fallback)"]); 
+          setSelectedKw("滴雞精推薦 (Fallback)");
         }
-      } catch (e: any) {
-        addLog(`❌ 未知系統錯誤: ${e.message}`);
+      } catch (e) {
+        addLog("❌ 連線錯誤");
       }
     }
-    
-    addLog(`🏁 所有任務執行完畢`);
-    setLoading(false);
+    init();
+  }, []);
+
+  const addLog = (msg: string) => {
+    setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev]);
   };
+
+  // 執行單一關鍵字分析
+  const handleAnalyze = async () => {
+    if (!selectedKw || loading) return;
+    
+    setLoading(true);
+    addLog(`🚀 開始分析: ${selectedKw}`);
+    
+    try {
+      // 呼叫 Server Action
+      const result = await runGeoPipeline(selectedKw);
+      
+      // 更新結果緩存 (這樣切換回來時資料還在)
+      setResults(prev => ({
+        ...prev,
+        [selectedKw]: result
+      }));
+
+      if (result.status === 'success') {
+        addLog(`✅ 分析完成: ${selectedKw} (Model: ${result.usedModel})`);
+      } else {
+        addLog(`❌ 分析失敗: ${result.errorMessage}`);
+      }
+
+    } catch (e: any) {
+      addLog(`❌ 系統錯誤: ${e.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 取得當前選中關鍵字的結果 (如果有跑過的話)
+  const currentResult = selectedKw ? results[selectedKw] : null;
 
   return (
-    <div className="min-h-screen bg-slate-50 p-6 md:p-10 font-sans text-slate-900">
-      <div className="max-w-6xl mx-auto space-y-8">
+    <div className="flex h-screen bg-slate-50 font-sans text-slate-900 overflow-hidden">
+      
+      {/* --- 左側 Sidebar (關鍵字清單) --- */}
+      <div className={`
+        ${isSidebarOpen ? 'w-64' : 'w-0'} 
+        bg-slate-900 text-slate-300 transition-all duration-300 flex flex-col border-r border-slate-800
+      `}>
+        <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950">
+          <h2 className="font-bold text-white tracking-wider">DATA SOURCE</h2>
+        </div>
         
-        {/* Header */}
-        <header className="text-center space-y-4">
-          <h1 className="text-4xl md:text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-700 to-indigo-600">
-            GEO 自動化分析儀表板
-          </h1>
-          <p className="text-slate-600 font-medium">
-            Next.js 14 • Real-Time Apify • Gemini AI • Supabase
-          </p>
+        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+          {keywords.length === 0 && <div className="text-sm text-slate-500 p-4 text-center">讀取中...</div>}
+          
+          {keywords.map((kw) => (
+            <button
+              key={kw}
+              onClick={() => setSelectedKw(kw)}
+              className={`
+                w-full text-left px-4 py-3 rounded-lg text-sm transition-all
+                ${selectedKw === kw 
+                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50 font-medium' 
+                  : 'hover:bg-slate-800 text-slate-400'}
+              `}
+            >
+              {kw}
+              {/* 如果這個關鍵字已經跑過，顯示一個綠色小點 */}
+              {results[kw]?.status === 'success' && (
+                <span className="float-right w-2 h-2 mt-1.5 rounded-full bg-green-400"></span>
+              )}
+            </button>
+          ))}
+        </div>
 
-          {/* 視覺化流程圖 */}
-          <div className="flex flex-wrap justify-center items-center gap-2 text-sm text-slate-600 mt-6 bg-white p-4 rounded-xl shadow-sm w-fit mx-auto border border-slate-200">
-            <span className="flex items-center font-bold"><span className="bg-slate-800 text-white w-6 h-6 flex items-center justify-center rounded-full mr-2 text-xs">1</span> 讀取 Excel</span>
-            <span className="text-slate-300">➜</span>
-            <span className="flex items-center font-bold"><span className="bg-blue-600 text-white w-6 h-6 flex items-center justify-center rounded-full mr-2 text-xs">2</span> Apify 爬蟲</span>
-            <span className="text-slate-300">➜</span>
-            <span className="flex items-center font-bold"><span className="bg-purple-600 text-white w-6 h-6 flex items-center justify-center rounded-full mr-2 text-xs">3</span> Gemini 優化</span>
-            <span className="text-slate-300">➜</span>
-            <span className="flex items-center font-bold"><span className="bg-green-600 text-white w-6 h-6 flex items-center justify-center rounded-full mr-2 text-xs">4</span> 存入 DB</span>
+        {/* 底部 Log 預覽 */}
+        <div className="p-4 bg-slate-950 text-xs font-mono border-t border-slate-800 h-48 overflow-y-auto">
+           <div className="text-slate-500 mb-2 font-bold">TERMINAL LOGS</div>
+           {logs.map((log, i) => (
+             <div key={i} className="mb-1 truncate text-slate-400 border-l-2 border-slate-700 pl-2">
+               {log}
+             </div>
+           ))}
+        </div>
+      </div>
+
+      {/* --- 右側 Main Content (工作區) --- */}
+      <div className="flex-1 flex flex-col h-screen overflow-hidden">
+        
+        {/* Top Header */}
+        <header className="bg-white border-b border-slate-200 p-4 flex justify-between items-center shadow-sm z-10">
+          <div className="flex items-center gap-4">
+            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 hover:bg-slate-100 rounded text-slate-500">
+              ☰
+            </button>
+            <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-700 to-indigo-600">
+              GEO Analytics Dashboard
+            </h1>
+          </div>
+          <div className="text-sm text-slate-500">
+             Current Model: <span className="font-mono bg-slate-100 px-2 py-1 rounded">Gemini 3 Flash</span>
           </div>
         </header>
 
-        {/* 啟動按鈕 */}
-        <div className="flex justify-center">
-          <button
-            onClick={handleRun}
-            disabled={loading}
-            className={`
-              px-10 py-4 rounded-full text-xl font-bold shadow-xl transition-all transform hover:scale-105 active:scale-95
-              ${loading 
-                ? 'bg-slate-300 text-slate-500 cursor-not-allowed' 
-                : 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:shadow-blue-500/30 ring-4 ring-blue-50'}
-            `}
-          >
-            {loading ? '⚡ 系統正在全速運算中...' : '🚀 執行真實數據分析'}
-          </button>
-        </div>
-
-        {/* 主內容區：左日誌 / 右結果 */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+        {/* 主要內容捲動區 */}
+        <main className="flex-1 overflow-y-auto p-6 md:p-10 bg-slate-50">
           
-          {/* 左側：即時運算日誌 (Terminal) */}
-          <div className="lg:col-span-4">
-            <div className="bg-slate-900 rounded-xl overflow-hidden shadow-2xl border border-slate-800 sticky top-8">
-              <div className="bg-slate-800 px-4 py-3 flex items-center justify-between border-b border-slate-700">
-                <div className="flex space-x-2">
-                  <div className="w-3 h-3 rounded-full bg-red-500"></div>
-                  <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
-                  <div className="w-3 h-3 rounded-full bg-green-500"></div>
-                </div>
-                <span className="text-xs text-slate-400 font-mono">Terminal Output</span>
-              </div>
-              <div className="p-4 h-[500px] overflow-y-auto font-mono text-xs space-y-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900">
-                {logs.length === 0 && <p className="text-slate-600 italic text-center mt-20">系統待命，準備執行...</p>}
-                {logs.map((log, i) => (
-                  <div key={i} className={`border-l-2 pl-3 ${log.includes('❌') ? 'text-red-400 border-red-800' : log.includes('✅') ? 'text-green-400 border-green-800' : 'text-slate-300 border-slate-700'}`}>
-                    {log}
-                  </div>
-                ))}
-                {loading && <div className="animate-pulse text-blue-400 mt-4">▍ Processing data stream...</div>}
-              </div>
+          {!selectedKw ? (
+            <div className="h-full flex flex-col items-center justify-center text-slate-400">
+              <span className="text-6xl mb-4">👈</span>
+              <p>請從左側選單選擇一個關鍵字開始分析</p>
             </div>
-          </div>
-
-          {/* 右側：分析結果卡片 */}
-          <div className="lg:col-span-8 space-y-6">
-            {results.length === 0 && !loading && (
-              <div className="text-center py-24 bg-white rounded-2xl border-2 border-dashed border-slate-200">
-                <p className="text-slate-400 text-lg">尚未有分析結果</p>
-                <p className="text-slate-500 mt-2">請點擊上方按鈕讀取 Excel 並開始 Pipeline</p>
-              </div>
-            )}
-
-            {results.map((res, index) => (
-              <div key={index} className="bg-white rounded-2xl shadow-lg overflow-hidden border border-slate-100 transition-all hover:shadow-xl">
+          ) : (
+            <div className="max-w-5xl mx-auto space-y-6">
+              
+              {/* 1. 控制台與標題 */}
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                <div>
+                   <h2 className="text-3xl font-bold text-slate-800">{selectedKw}</h2>
+                   <p className="text-slate-500 text-sm mt-1">
+                     狀態: {currentResult ? (currentResult.status === 'success' ? '✅ 分析完成' : '❌ 發生錯誤') : '⚪ 等待執行'}
+                   </p>
+                </div>
                 
-                {/* 卡片標題列 */}
-                <div className={`px-6 py-4 border-b flex justify-between items-center ${res.status === 'error' ? 'bg-red-50 border-red-100' : 'bg-slate-50 border-slate-100'}`}>
-                  <div className="flex items-center gap-3">
-                    <span className="text-2xl">🔍</span>
-                    <div>
-                      <h3 className="text-xl font-bold text-slate-800">{res.keyword}</h3>
-                      <p className="text-xs text-slate-500">分析時間: {new Date().toLocaleTimeString()}</p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    {res.status === 'success' ? (
-                       <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                         ✨ Success
-                       </span>
-                    ) : (
-                       <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                         ❌ Failed
-                       </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* 卡片內容 */}
-                <div className="p-6">
-                  {res.status === 'error' ? (
-                    <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded">
-                      <p className="font-bold text-red-700">執行失敗</p>
-                      <p className="text-sm text-red-600 mt-1">{res.errorMessage}</p>
-                    </div>
+                <button
+                  onClick={handleAnalyze}
+                  disabled={loading}
+                  className={`
+                    px-6 py-3 rounded-lg font-bold shadow-md transition-all flex items-center gap-2
+                    ${loading 
+                      ? 'bg-slate-200 text-slate-500 cursor-not-allowed' 
+                      : 'bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg'}
+                  `}
+                >
+                  {loading ? (
+                    <>
+                      <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      執行 Pipeline 中...
+                    </>
                   ) : (
-                    <div className="space-y-6">
-                      
-                      {/* PAA 數據展示 */}
-                      <div>
-                        <div className="flex justify-between items-center mb-3">
-                          <h4 className="text-sm font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
-                            <span className="w-2 h-2 rounded-full bg-blue-500"></span>
-                            真實 PAA 數據 (From Google)
-                          </h4>
-                          <span className="text-xs bg-slate-100 text-slate-500 px-2 py-1 rounded">Count: {res.paa.length}</span>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          {res.paa.length > 0 ? res.paa.map((q, i) => (
-                            <span key={i} className="text-xs font-medium bg-blue-50 text-blue-700 px-3 py-1.5 rounded-lg border border-blue-100">
-                              {q}
-                            </span>
-                          )) : (
-                            <span className="text-xs text-slate-400 italic">無 PAA 數據 (使用 Fallback 邏輯)</span>
-                          )}
-                        </div>
-                      </div>
-
-                      <hr className="border-slate-100" />
-
-                      {/* GEO AI 內容展示 */}
-                      <div>
-                        <div className="flex justify-between items-center mb-3">
-                          <h4 className="text-sm font-bold text-indigo-500 uppercase tracking-wider flex items-center gap-2">
-                            <span className="w-2 h-2 rounded-full bg-indigo-500"></span>
-                            GEO 優化內容 (Gemini)
-                          </h4>
-                          <span className="text-xs font-mono bg-indigo-50 text-indigo-600 px-2 py-1 rounded border border-indigo-100">
-                            Model: {res.usedModel}
-                          </span>
-                        </div>
-                        
-                        {/* 這裡用 whitespace-pre-wrap 保留 AI 的排版，如果你有裝 react-markdown 可以換成 <ReactMarkdown> */}
-                        <div className="prose prose-slate max-w-none bg-slate-50 p-5 rounded-xl border border-slate-200 text-sm leading-relaxed whitespace-pre-wrap font-sans text-slate-700">
-                          {res.content}
-                        </div>
-                      </div>
-
-                    </div>
+                    <>🚀 執行 GEO 分析</>
                   )}
-                </div>
+                </button>
               </div>
-            ))}
-          </div>
-        </div>
+
+              {/* 2. 分析結果顯示區 */}
+              {currentResult && currentResult.status === 'success' && (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in-up">
+                  
+                  {/* 左欄: 真實數據 (Apify) */}
+                  <div className="lg:col-span-1 space-y-6">
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                       <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4 border-b pb-2">
+                         真實 PAA 數據 (Google)
+                       </h3>
+                       <div className="flex flex-wrap gap-2">
+                         {currentResult.paa.length > 0 ? currentResult.paa.map((q, i) => (
+                           <div key={i} className="text-sm bg-slate-50 text-slate-700 p-3 rounded-lg border border-slate-100 w-full hover:border-blue-200 transition-colors">
+                             ❓ {q}
+                           </div>
+                         )) : (
+                            <div className="text-slate-400 italic text-sm">此關鍵字無 PAA 數據</div>
+                         )}
+                       </div>
+                    </div>
+
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                       <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4 border-b pb-2">
+                         Meta Info
+                       </h3>
+                       <div className="space-y-2 text-sm">
+                          <div className="flex justify-between">
+                            <span className="text-slate-500">Model:</span>
+                            <span className="font-mono text-indigo-600 bg-indigo-50 px-2 rounded">{currentResult.usedModel}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-500">Storage:</span>
+                            <span className="text-green-600">Supabase ✅</span>
+                          </div>
+                       </div>
+                    </div>
+                  </div>
+
+                  {/* 右欄: GEO 內容 (Gemini) */}
+                  <div className="lg:col-span-2">
+                    <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-200 min-h-[500px]">
+                      <h3 className="text-xs font-bold text-indigo-500 uppercase tracking-wider mb-6 flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-indigo-500"></span>
+                        GEO Optimized Content
+                      </h3>
+                      
+                      {/* 內容渲染區 */}
+                      <article className="prose prose-slate max-w-none prose-headings:text-slate-800 prose-p:text-slate-600 prose-li:text-slate-600">
+                        {/* 簡單的 Markdown 渲染，保留換行與空白 */}
+                        <div className="whitespace-pre-wrap font-sans text-base leading-relaxed">
+                          {currentResult.content}
+                        </div>
+                      </article>
+                    </div>
+                  </div>
+
+                </div>
+              )}
+              
+              {/* 錯誤顯示 */}
+              {currentResult && currentResult.status === 'error' && (
+                <div className="bg-red-50 border-l-4 border-red-500 p-6 rounded-lg">
+                  <h3 className="text-red-800 font-bold">Pipeline Error</h3>
+                  <p className="text-red-600 mt-2">{currentResult.errorMessage}</p>
+                </div>
+              )}
+
+            </div>
+          )}
+        </main>
       </div>
     </div>
   );
