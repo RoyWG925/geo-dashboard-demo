@@ -1,13 +1,20 @@
-// src/app/page.tsx
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
 import { runGeoPipeline, getKeywordsFromExcel, GeoAnalysisResult } from './actions';
+import { createClient } from '@/utils/supabase/client';
+import { useRouter } from 'next/navigation';
 import { 
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell 
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from 'recharts';
 
 type ResultMap = Record<string, GeoAnalysisResult & { duration?: number }>;
+
+interface UserUsage {
+  usage_count: number;
+  max_usage: number;
+  is_premium: boolean;
+}
 
 export default function GeoDashboard() {
   const [keywords, setKeywords] = useState<string[]>([]);
@@ -15,14 +22,58 @@ export default function GeoDashboard() {
   const [newKeywordInput, setNewKeywordInput] = useState("");
   const [selectedKw, setSelectedKw] = useState<string | null>(null);
   const [results, setResults] = useState<ResultMap>({});
+  const [user, setUser] = useState<any>(null);
+  const [userUsage, setUserUsage] = useState<UserUsage | null>(null);
+  const [showRefinement, setShowRefinement] = useState(false);
+  const [refinementPrompt, setRefinementPrompt] = useState("");
+  const [isRefining, setIsRefining] = useState(false);
   
   const [loading, setLoading] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
+  const router = useRouter();
+  const supabase = createClient();
+
   const addLog = (msg: string) => {
     setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev]);
   };
+
+  // 檢查用戶認證狀態
+  useEffect(() => {
+    const checkAuth = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        router.push('/auth');
+        return;
+      }
+      setUser(session.user);
+      
+      // 獲取用戶使用次數
+      try {
+        const response = await fetch('/api/user-usage');
+        if (response.ok) {
+          const usage = await response.json();
+          setUserUsage(usage);
+          addLog(`👤 用戶登入: ${session.user.email} (${usage.usage_count}/${usage.max_usage})`);
+        }
+      } catch (error) {
+        console.error('Failed to fetch usage:', error);
+      }
+    };
+    checkAuth();
+  }, [router, supabase.auth]);
+
+  // 監聽認證狀態變化
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_OUT' || !session) {
+        router.push('/auth');
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, [router, supabase.auth]);
 
   useEffect(() => {
     async function init() {
@@ -45,6 +96,21 @@ export default function GeoDashboard() {
 
   const handleAddKeyword = () => {
     if (!newKeywordInput.trim()) return;
+    
+    // 檢查是否為 Premium 用戶，普通用戶不能新增關鍵字
+    if (userUsage && !userUsage.is_premium) {
+      addLog(`❌ 無法新增關鍵字: 普通用戶無此權限`);
+      alert('普通用戶無法新增關鍵字。如需此功能請聯繫管理員\n電子郵件：jg971402@gmail.com');
+      return;
+    }
+    
+    // 檢查是否超過使用限制
+    if (userUsage && userUsage.usage_count >= userUsage.max_usage && !userUsage.is_premium) {
+      addLog(`❌ 無法新增關鍵字: 已達使用次數上限 (${userUsage.usage_count}/${userUsage.max_usage})`);
+      alert('您已達到使用次數上限，無法新增關鍵字。請聯繫管理員以獲得更多使用次數。');
+      return;
+    }
+    
     const newKw = newKeywordInput.trim();
     if (!keywords.includes(newKw)) {
       setKeywords(prev => [newKw, ...prev]);
@@ -57,18 +123,22 @@ export default function GeoDashboard() {
   const handleAnalyze = async () => {
     if (!selectedKw || loading) return;
     
+    // 檢查使用次數
+    if (userUsage && userUsage.usage_count >= userUsage.max_usage && !userUsage.is_premium) {
+      addLog(`❌ 無法執行分析: 已達使用次數上限 (${userUsage.usage_count}/${userUsage.max_usage})`);
+      alert('您已達到使用次數上限，無法執行分析。請聯繫管理員\n電子郵件：jg971402@gmail.com');
+      return;
+    }
+    
     setLoading(true);
     addLog(`🚀 [Start] 開始分析: ${selectedKw}`);
     
-    // ⏱️ 開始計時
     const startTime = performance.now();
     
     try {
       const result = await runGeoPipeline(selectedKw);
-      
-      // ⏱️ 結束計時
       const endTime = performance.now();
-      const duration = Math.round(endTime - startTime); // 毫秒
+      const duration = Math.round(endTime - startTime);
 
       setResults(prev => ({ 
         ...prev, 
@@ -77,6 +147,10 @@ export default function GeoDashboard() {
 
       if (result.status === 'success') {
         addLog(`✅ [Success] ${selectedKw} 完成 (耗時: ${duration}ms)`);
+        // 更新使用次數
+        if (userUsage) {
+          setUserUsage(prev => prev ? { ...prev, usage_count: prev.usage_count + 1 } : null);
+        }
       } else {
         addLog(`❌ [Failed] ${selectedKw} 失敗: ${result.errorMessage}`);
       }
@@ -86,6 +160,64 @@ export default function GeoDashboard() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleRefineContent = async () => {
+    if (!selectedKw || !refinementPrompt.trim() || !currentResult?.content) return;
+    
+    setIsRefining(true);
+    addLog(`🔧 開始微調內容: ${selectedKw}`);
+    
+    try {
+      const response = await fetch('/api/refine-content', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          originalContent: currentResult.content,
+          refinementPrompt: refinementPrompt.trim(),
+          keyword: selectedKw
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.message || '微調失敗');
+      }
+
+      const { refinedContent, usedModel } = await response.json();
+      
+      // 更新結果
+      setResults(prev => ({
+        ...prev,
+        [selectedKw]: {
+          ...prev[selectedKw],
+          content: refinedContent,
+          usedModel: usedModel
+        }
+      }));
+
+      addLog(`✅ 內容微調完成: ${selectedKw}`);
+      setShowRefinement(false);
+      setRefinementPrompt("");
+      
+      // 更新使用次數
+      if (userUsage) {
+        setUserUsage(prev => prev ? { ...prev, usage_count: prev.usage_count + 1 } : null);
+      }
+
+    } catch (error: any) {
+      addLog(`❌ 微調失敗: ${error.message}`);
+      alert(error.message);
+    } finally {
+      setIsRefining(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push('/auth');
   };
 
   const filteredKeywords = useMemo(() => {
@@ -116,6 +248,18 @@ export default function GeoDashboard() {
 
   const compliance = currentResult?.content ? checkCompliance(currentResult.content) : null;
 
+  // 如果用戶未登入，不渲染主界面
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-slate-600">正在檢查登入狀態...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen bg-slate-100 font-sans text-slate-900 overflow-hidden">
       
@@ -123,9 +267,42 @@ export default function GeoDashboard() {
       <aside className={`${isSidebarOpen ? 'w-80 translate-x-0' : 'w-0 -translate-x-full opacity-0'} bg-slate-900 text-slate-300 transition-all duration-300 flex flex-col border-r border-slate-800 z-20`}>
         <div className="p-5 border-b border-slate-800 bg-slate-950 shrink-0 space-y-4">
           <h2 className="font-bold text-white tracking-wider text-sm">DATASETS ({keywords.length})</h2>
+          
+          {/* 用戶權限提示 */}
+          {userUsage && !userUsage.is_premium && (
+            <div className="bg-amber-900/30 border border-amber-700/50 rounded-lg p-3 text-xs">
+              <div className="flex items-center gap-2 text-amber-300 mb-1">
+                <span>⚠️</span>
+                <span className="font-medium">普通用戶限制</span>
+              </div>
+              <p className="text-amber-200/80">
+                無法新增關鍵字，如需此功能請聯繫管理員<br />
+                電子郵件：jg971402@gmail.com
+              </p>
+            </div>
+          )}
+          
           <div className="flex gap-2">
-            <input type="text" placeholder="輸入關鍵字..." value={newKeywordInput} onChange={(e) => setNewKeywordInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleAddKeyword()} className="w-full bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded px-2 py-2 outline-none focus:border-blue-500" />
-            <button onClick={handleAddKeyword} className="bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 rounded font-bold">Add</button>
+            <input 
+              type="text" 
+              placeholder={userUsage?.is_premium ? "輸入關鍵字..." : "僅 Premium 用戶可新增"} 
+              value={newKeywordInput} 
+              onChange={(e) => setNewKeywordInput(e.target.value)} 
+              onKeyDown={(e) => e.key === 'Enter' && handleAddKeyword()} 
+              disabled={userUsage ? !userUsage.is_premium : false}
+              className={`w-full bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded px-2 py-2 outline-none focus:border-blue-500 ${
+                userUsage && !userUsage.is_premium ? 'opacity-50 cursor-not-allowed' : ''
+              }`} 
+            />
+            <button 
+              onClick={handleAddKeyword} 
+              disabled={userUsage ? !userUsage.is_premium : false}
+              className={`bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 rounded font-bold transition-colors ${
+                userUsage && !userUsage.is_premium ? 'opacity-50 cursor-not-allowed bg-slate-500' : ''
+              }`}
+            >
+              Add
+            </button>
           </div>
           <div className="relative">
             <input type="text" placeholder="過濾清單..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full bg-slate-900 border border-slate-700 text-slate-400 text-xs rounded px-2 py-1.5 outline-none" />
@@ -162,12 +339,30 @@ export default function GeoDashboard() {
             <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 hover:bg-slate-100 rounded text-slate-600">☰</button>
             <h1 className="text-lg font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-700 to-indigo-600">GEO Analytics Dashboard</h1>
           </div>
-          <div className="flex items-center gap-3">
-             <div className="text-xs text-right hidden sm:block">
-                <p className="text-slate-900 font-bold">{currentResult?.usedModel || 'Pending...'}</p>
-                <p className="text-slate-400">Active Model</p>
-             </div>
-             <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold shadow-lg ${loading ? 'bg-yellow-500 animate-pulse' : 'bg-gradient-to-tr from-blue-500 to-purple-600'}`}>AI</div>
+          <div className="flex items-center gap-4">
+            {/* 使用次數顯示 */}
+            {userUsage && (
+              <div className="text-xs text-right hidden sm:block">
+                <p className="text-slate-900 font-bold">
+                  {userUsage.usage_count}/{userUsage.max_usage} 
+                  {userUsage.is_premium && <span className="text-yellow-600 ml-1">👑</span>}
+                </p>
+                <p className="text-slate-400">使用次數</p>
+              </div>
+            )}
+            
+            {/* 用戶信息 */}
+            <div className="text-xs text-right hidden md:block">
+              <p className="text-slate-900 font-bold">{user?.email}</p>
+              <button 
+                onClick={handleLogout}
+                className="text-slate-400 hover:text-red-500 transition-colors"
+              >
+                登出
+              </button>
+            </div>
+            
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold shadow-lg ${loading ? 'bg-yellow-500 animate-pulse' : 'bg-gradient-to-tr from-blue-500 to-purple-600'}`}>AI</div>
           </div>
         </header>
 
@@ -186,9 +381,11 @@ export default function GeoDashboard() {
                   <XAxis dataKey="name" hide />
                   <YAxis tick={{fontSize:12, fill:'#94a3b8'}} axisLine={false} tickLine={false} />
                   <Tooltip contentStyle={{borderRadius:'8px', border:'none', boxShadow:'0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
-                  <Bar dataKey="count" radius={[4, 4, 0, 0]}>
-                    {chartData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.status === 'success' ? '#4f46e5' : '#e2e8f0'} />)}
-                  </Bar>
+                  <Bar 
+                    dataKey="count" 
+                    radius={[4, 4, 0, 0]} 
+                    fill="#4f46e5"
+                  />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -269,7 +466,49 @@ export default function GeoDashboard() {
                   {/* Right Column: Content */}
                   <div className="xl:col-span-2">
                     <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-100 min-h-[600px]">
-                      <h3 className="font-bold text-slate-800 mb-6 border-b pb-4">Optimized Content</h3>
+                      <div className="flex justify-between items-center mb-6 border-b pb-4">
+                        <h3 className="font-bold text-slate-800">Optimized Content</h3>
+                        <button
+                          onClick={() => setShowRefinement(!showRefinement)}
+                          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm rounded-lg font-medium transition-colors"
+                        >
+                          🔧 微調內容
+                        </button>
+                      </div>
+
+                      {/* 微調功能區域 */}
+                      {showRefinement && (
+                        <div className="mb-6 p-4 bg-slate-50 rounded-xl border border-slate-200">
+                          <h4 className="font-medium text-slate-700 mb-3">內容微調</h4>
+                          <div className="space-y-3">
+                            <textarea
+                              value={refinementPrompt}
+                              onChange={(e) => setRefinementPrompt(e.target.value)}
+                              placeholder="請描述您希望如何修改內容，例如：&#10;- 移除表格&#10;- 增加更多說明&#10;- 調整語氣"
+                              className="w-full h-24 px-3 py-2 border border-slate-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                            />
+                            <div className="flex gap-2">
+                              <button
+                                onClick={handleRefineContent}
+                                disabled={isRefining || !refinementPrompt.trim()}
+                                className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-slate-300 text-white text-sm rounded-lg font-medium transition-colors"
+                              >
+                                {isRefining ? '微調中...' : '執行微調'}
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setShowRefinement(false);
+                                  setRefinementPrompt("");
+                                }}
+                                className="px-4 py-2 bg-slate-400 hover:bg-slate-500 text-white text-sm rounded-lg font-medium transition-colors"
+                              >
+                                取消
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
                       <article className="prose prose-slate prose-lg max-w-none">
                         <div className="whitespace-pre-wrap font-sans text-base leading-relaxed">{currentResult.content}</div>
                       </article>
