@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { createClient } from '@/utils/supabase/client';
 import { useRouter } from 'next/navigation';
 
@@ -18,10 +18,27 @@ interface UserUsage {
 export default function AdminPage() {
   const [users, setUsers] = useState<UserUsage[]>([]);
   const [loading, setLoading] = useState(true);
-  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [currentUser, setCurrentUser] = useState<{ email?: string } | null>(null);
   const [message, setMessage] = useState('');
   const router = useRouter();
   const supabase = createClient();
+
+  const fetchUsers = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('user_usage')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setUsers(data || []);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : '未知錯誤';
+      setMessage(`獲取用戶列表失敗: ${errorMessage}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [supabase]);
 
   useEffect(() => {
     const checkAdminAuth = async () => {
@@ -44,23 +61,7 @@ export default function AdminPage() {
     };
 
     checkAdminAuth();
-  }, [router, supabase.auth]);
-
-  const fetchUsers = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('user_usage')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-      setUsers(data || []);
-    } catch (error: any) {
-      setMessage(`獲取用戶列表失敗: ${error.message}`);
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [fetchUsers, router, supabase.auth]);
 
   const updateUserUsage = async (userId: string, maxUsage: number, isPremium: boolean) => {
     try {
@@ -76,8 +77,9 @@ export default function AdminPage() {
       
       setMessage('用戶設定更新成功');
       await fetchUsers();
-    } catch (error: any) {
-      setMessage(`更新失敗: ${error.message}`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : '未知錯誤';
+      setMessage(`更新失敗: ${errorMessage}`);
     }
   };
 
@@ -92,8 +94,9 @@ export default function AdminPage() {
       
       setMessage('使用次數重置成功');
       await fetchUsers();
-    } catch (error: any) {
-      setMessage(`重置失敗: ${error.message}`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : '未知錯誤';
+      setMessage(`重置失敗: ${errorMessage}`);
     }
   };
 

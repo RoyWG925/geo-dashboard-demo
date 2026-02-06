@@ -26,6 +26,20 @@
 - 無法執行 GEO 分析
 - 顯示聯繫管理員信息
 
+## 📚 文檔說明
+
+- **README.md** - 專案概述與快速開始（本文件）
+- **FEATURES.md** - 完整功能說明與技術細節
+- **SETUP_GUIDE.md** - 詳細安裝設定指南
+- **DEPLOYMENT.md** - 部署說明
+- **SUPABASE_SETUP.md** - Supabase 資料庫設定
+- **UTF8_BASE64_FIX.md** - UTF-8 編碼技術文檔
+
+## 📊 資料庫腳本
+
+- **complete-supabase-setup.sql** - 完整資料庫設定（包含所有表格和權限）
+- **user-keywords-schema.sql** - 用戶自定義關鍵字表格
+
 ## 🚀 快速開始
 
 ### 1. 環境設置
@@ -56,9 +70,12 @@ APIFY_API_TOKEN=your_apify_token
 
 ### 3. Supabase 資料庫設置
 
-1. 在 Supabase 中執行 `supabase-schema.sql` 腳本
-2. 啟用 Google OAuth 認證
-3. 設置認證回調 URL：`https://your-domain.com/auth/callback`
+1. 在 Supabase SQL Editor 中執行 `complete-supabase-setup.sql` 腳本
+2. 執行 `user-keywords-schema.sql` 創建用戶關鍵字表格
+3. 啟用 Google OAuth 認證
+4. 設置認證回調 URL：`https://your-domain.com/auth/callback`
+
+詳細說明請參考 `SUPABASE_SETUP.md` 和 `SETUP_GUIDE.md`。
 
 ### 4. 啟動開發服務器
 

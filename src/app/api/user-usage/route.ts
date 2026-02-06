@@ -1,5 +1,5 @@
 import { createClient } from '@/utils/supabase/server';
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 
 export async function GET() {
   try {
@@ -54,9 +54,10 @@ export async function GET() {
     }
 
     return NextResponse.json(usage);
-  } catch (error: any) {
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : '使用次數檢查失敗';
     console.error('Usage check error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }
 
@@ -104,8 +105,9 @@ export async function POST() {
     if (updateError) throw updateError;
 
     return NextResponse.json(updatedUsage);
-  } catch (error: any) {
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : '使用次數更新失敗';
     console.error('Usage increment error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }

@@ -33,7 +33,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 執行內容微調
-    const modelsToTry = ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.5-pro'];
+    const modelsToTry = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-3-flash-preview'];
     let refinedContent = '';
     let usedModel = '';
 
@@ -55,21 +55,15 @@ export async function POST(request: NextRequest) {
       請輸出修改後的完整內容：
     `;
 
-    for (const modelId of modelsToTry) {
-      try {
-        console.log(`🤖 Content refinement using: ${modelId}...`);
-        const { text } = await generateText({
-          model: google(modelId),
-          prompt: fullPrompt,
-        });
-        refinedContent = text;
-        usedModel = modelId;
-        break;
-      } catch (e: any) {
-        console.warn(`⚠️ ${modelId} failed: ${e.message}`);
-        if (modelId === modelsToTry[modelsToTry.length - 1]) throw e;
-      }
-    }
+    // 使用第一個模型進行微調
+    const modelId = modelsToTry[0];
+    console.log(`🤖 Content refinement using: ${modelId}...`);
+    const { text } = await generateText({
+      model: google(modelId),
+      prompt: fullPrompt,
+    });
+    refinedContent = text;
+    usedModel = modelId;
 
     // 保存微調記錄到資料庫
     const { error: saveError } = await supabase
@@ -93,8 +87,9 @@ export async function POST(request: NextRequest) {
       success: true
     });
 
-  } catch (error: any) {
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : '內容微調失敗';
     console.error('Content refinement error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }

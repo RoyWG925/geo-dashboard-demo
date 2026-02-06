@@ -34,12 +34,13 @@ export default function AuthPage() {
         }
       });
       if (error) throw error;
-    } catch (error: any) {
+    } catch (error) {
       console.error('Google OAuth error:', error);
-      if (error.message.includes('provider is not enabled')) {
+      const errorMessage = error instanceof Error ? error.message : '登入失敗';
+      if (errorMessage.includes('provider is not enabled')) {
         setMessage('Google 登入尚未設置完成，請使用 Email/密碼登入或聯繫管理員。');
       } else {
-        setMessage(`Google 登入失敗: ${error.message}`);
+        setMessage(`Google 登入失敗: ${errorMessage}`);
       }
     } finally {
       setLoading(false);
@@ -66,8 +67,9 @@ export default function AuthPage() {
         if (error) throw error;
         router.push('/');
       }
-    } catch (error: any) {
-      setMessage(`${isSignUp ? '註冊' : '登入'}失敗: ${error.message}`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : '操作失敗';
+      setMessage(`${isSignUp ? '註冊' : '登入'}失敗: ${errorMessage}`);
     } finally {
       setLoading(false);
     }

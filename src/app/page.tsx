@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
-import { runGeoPipeline, getKeywordsFromExcel, GeoAnalysisResult } from './actions';
+import { getKeywordsFromExcel, getUserKeywords, addUserKeyword, deleteUserKeyword, getAnalysisHistory, GeoAnalysisResult } from './actions';
 import { createClient } from '@/utils/supabase/client';
 import { useRouter } from 'next/navigation';
 import { 
@@ -22,18 +22,56 @@ export default function GeoDashboard() {
   const [newKeywordInput, setNewKeywordInput] = useState("");
   const [selectedKw, setSelectedKw] = useState<string | null>(null);
   const [results, setResults] = useState<ResultMap>({});
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<{ email?: string } | null>(null);
   const [userUsage, setUserUsage] = useState<UserUsage | null>(null);
   const [showRefinement, setShowRefinement] = useState(false);
   const [refinementPrompt, setRefinementPrompt] = useState("");
   const [isRefining, setIsRefining] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+  const [customPrompt, setCustomPrompt] = useState("");
+  const [forceRefresh, setForceRefresh] = useState(false);
+  const [streamingContent, setStreamingContent] = useState("");
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [userCustomKeywords, setUserCustomKeywords] = useState<Set<string>>(new Set());
+  const [showHistory, setShowHistory] = useState(false);
+  const [analysisHistory, setAnalysisHistory] = useState<Array<{
+    id: string;
+    keyword: string;
+    paa_questions: string[];
+    geo_optimized_content: string;
+    created_at: string;
+  }>>([]);
   
-  const [loading, setLoading] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   const router = useRouter();
   const supabase = createClient();
+
+  const modelOptions = [
+    { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash' },
+    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+    { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite' }
+  ];
+
+  const defaultPrompt = `你是一個專業的 GEO (Generative Engine Optimization) 專家。
+
+**任務目標：**
+撰寫符合 AI 搜尋引擎（如 ChatGPT Search、Google AI Overviews、Perplexity）偏好的內容。
+
+**AI 偏好的內容原則：**
+1. **可掃描性：** 使用項目符號和**粗體關鍵字**
+2. **直接性：** 採用 BLUF (Bottom Line Up Front) 原則，重點先說
+3. **結構化：** 使用清晰的 H2 / H3 層次結構
+4. **決策導向：** 適當使用表格進行比較
+
+**嚴格要求：**
+- **語言：** 繁體中文（台灣）
+- **格式：** 僅使用 Markdown
+- **開頭：** 以不超過 80 個中文字的 BLUF 摘要開始
+- **項目符號：** 大量使用 * 或 - 配合**粗體關鍵字**
+- **表格：** 包含至少一個 Markdown 比較表格（最少 3 欄）`;
 
   const addLog = (msg: string) => {
     setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev]);
@@ -77,51 +115,141 @@ export default function GeoDashboard() {
 
   useEffect(() => {
     async function init() {
-      addLog("📂 系統啟動: 正在讀取 Excel 完整清單...");
+      addLog("📂 系統啟動: 正在讀取關鍵字清單...");
       try {
-        const kws = await getKeywordsFromExcel();
-        if (kws && kws.length > 0 && !kws[0].startsWith("Error")) {
-          setKeywords(kws);
-          addLog(`✅ 讀取成功: 共載入 ${kws.length} 個關鍵字`);
-        } else {
-          addLog("❌ Excel 讀取異常，切換至備用清單");
-          setKeywords(["滴雞精推薦", "葉黃素功效", "益生菌怎麼吃", "魚油推薦", "維他命C"]); 
+        // 1. 讀取 Excel 關鍵字
+        const excelKws = await getKeywordsFromExcel();
+        
+        // 2. 讀取用戶自定義關鍵字
+        const userKws = await getUserKeywords();
+        
+        // 3. 記錄用戶自定義的關鍵字
+        setUserCustomKeywords(new Set(userKws));
+        
+        // 4. 合併關鍵字（用戶自定義的放在前面）
+        let allKeywords: string[] = [];
+        
+        if (userKws.length > 0) {
+          allKeywords = [...userKws];
+          addLog(`✅ 載入 ${userKws.length} 個自定義關鍵字`);
         }
-      } catch (e: any) {
-        addLog(`❌ 連線錯誤: ${e.message}`);
+        
+        if (excelKws && excelKws.length > 0 && !excelKws[0].startsWith("Error")) {
+          allKeywords = [...allKeywords, ...excelKws];
+          addLog(`✅ 載入 ${excelKws.length} 個 Excel 關鍵字`);
+        } else {
+          // 備用清單
+          const fallbackKws = ["滴雞精推薦", "葉黃素功效", "益生菌怎麼吃", "魚油推薦", "維他命C"];
+          allKeywords = [...allKeywords, ...fallbackKws];
+          addLog("⚠️ Excel 讀取異常，使用備用清單");
+        }
+        
+        setKeywords(allKeywords);
+        addLog(`📊 總計: ${allKeywords.length} 個關鍵字`);
+      } catch (e) {
+        const errorMsg = e instanceof Error ? e.message : '未知錯誤';
+        addLog(`❌ 載入錯誤: ${errorMsg}`);
+        setKeywords(["滴雞精推薦", "葉黃素功效", "益生菌怎麼吃", "魚油推薦", "維他命C"]);
       }
     }
     init();
   }, []);
 
-  const handleAddKeyword = () => {
+  const handleAddKeyword = async () => {
     if (!newKeywordInput.trim()) return;
     
-    // 檢查是否為 Premium 用戶，普通用戶不能新增關鍵字
-    if (userUsage && !userUsage.is_premium) {
-      addLog(`❌ 無法新增關鍵字: 普通用戶無此權限`);
-      alert('普通用戶無法新增關鍵字。如需此功能請聯繫管理員\n電子郵件：jg971402@gmail.com');
-      return;
-    }
-    
-    // 檢查是否超過使用限制
-    if (userUsage && userUsage.usage_count >= userUsage.max_usage && !userUsage.is_premium) {
-      addLog(`❌ 無法新增關鍵字: 已達使用次數上限 (${userUsage.usage_count}/${userUsage.max_usage})`);
-      alert('您已達到使用次數上限，無法新增關鍵字。請聯繫管理員以獲得更多使用次數。');
-      return;
-    }
-    
     const newKw = newKeywordInput.trim();
-    if (!keywords.includes(newKw)) {
-      setKeywords(prev => [newKw, ...prev]);
-      addLog(`➕ 已手動新增關鍵字: "${newKw}"`);
+    
+    // 檢查是否已存在
+    if (keywords.includes(newKw)) {
+      addLog(`⚠️ 關鍵字已存在: "${newKw}"`);
+      alert('此關鍵字已存在');
+      return;
     }
-    setSelectedKw(newKw);
-    setNewKeywordInput("");
+    
+    // 🔥 保存到資料庫
+    addLog(`💾 正在保存關鍵字: "${newKw}"`);
+    const result = await addUserKeyword(newKw);
+    
+    if (result.success) {
+      // 成功：更新前端列表和追蹤
+      setKeywords(prev => [newKw, ...prev]);
+      setUserCustomKeywords(prev => new Set([...prev, newKw]));
+      setSelectedKw(newKw);
+      setNewKeywordInput("");
+      addLog(`✅ ${result.message}: "${newKw}"`);
+    } else {
+      // 失敗：顯示錯誤訊息
+      addLog(`❌ ${result.message}`);
+      alert(result.message);
+    }
+  };
+
+  const handleDeleteKeyword = async (keyword: string, event: React.MouseEvent) => {
+    event.stopPropagation(); // 防止觸發選擇關鍵字
+    
+    if (!confirm(`確定要刪除關鍵字「${keyword}」嗎？`)) {
+      return;
+    }
+    
+    addLog(`🗑️ 正在刪除關鍵字: "${keyword}"`);
+    const result = await deleteUserKeyword(keyword);
+    
+    if (result.success) {
+      // 成功：更新前端列表和追蹤
+      setKeywords(prev => prev.filter(k => k !== keyword));
+      setUserCustomKeywords(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(keyword);
+        return newSet;
+      });
+      if (selectedKw === keyword) {
+        setSelectedKw(null);
+      }
+      addLog(`✅ ${result.message}: "${keyword}"`);
+    } else {
+      // 失敗：顯示錯誤訊息
+      addLog(`❌ ${result.message}`);
+      alert(result.message);
+    }
+  };
+
+  const loadAnalysisHistory = async () => {
+    addLog(`📜 載入分析歷史紀錄...`);
+    const history = await getAnalysisHistory(20);
+    setAnalysisHistory(history);
+    addLog(`✅ 載入 ${history.length} 筆歷史紀錄`);
+  };
+
+  const loadHistoryResult = (historyItem: typeof analysisHistory[0]) => {
+    addLog(`📂 載入歷史紀錄: "${historyItem.keyword}"`);
+    
+    // 設置選中的關鍵字
+    setSelectedKw(historyItem.keyword);
+    
+    // 如果關鍵字不在列表中，添加到列表
+    if (!keywords.includes(historyItem.keyword)) {
+      setKeywords(prev => [historyItem.keyword, ...prev]);
+    }
+    
+    // 設置結果
+    setResults(prev => ({
+      ...prev,
+      [historyItem.keyword]: {
+        keyword: historyItem.keyword,
+        paa: historyItem.paa_questions || [],
+        content: historyItem.geo_optimized_content || '',
+        status: 'success',
+        usedModel: 'cached'
+      }
+    }));
+    
+    // 關閉歷史紀錄面板
+    setShowHistory(false);
   };
 
   const handleAnalyze = async () => {
-    if (!selectedKw || loading) return;
+    if (!selectedKw || isStreaming) return;
     
     // 檢查使用次數
     if (userUsage && userUsage.usage_count >= userUsage.max_usage && !userUsage.is_premium) {
@@ -130,35 +258,125 @@ export default function GeoDashboard() {
       return;
     }
     
-    setLoading(true);
-    addLog(`🚀 [Start] 開始分析: ${selectedKw}`);
+    setIsStreaming(true);
+    setStreamingContent("");
+    addLog(`🚀 [Start] 開始串流分析: ${selectedKw} (模型: ${selectedModel})`);
+    if (forceRefresh) {
+      addLog(`🔄 強制重新生成 (不使用快取)`);
+    }
+    if (customPrompt) {
+      addLog(`🎨 使用自定義 Prompt`);
+    }
     
     const startTime = performance.now();
     
     try {
-      const result = await runGeoPipeline(selectedKw);
+      const response = await fetch('/api/stream-geo', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          keyword: selectedKw,
+          selectedModel,
+          customPrompt: customPrompt || undefined,
+          forceRefresh
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Stream request failed');
+      }
+
+      // 檢查是否為快取響應
+      const contentType = response.headers.get('Content-Type');
+      if (contentType?.includes('application/json')) {
+        const data = await response.json();
+        if (data.type === 'cached') {
+          addLog(`✅ 使用快取資料 (節省成本)`);
+          const endTime = performance.now();
+          const duration = Math.round(endTime - startTime);
+          
+          setResults(prev => ({
+            ...prev,
+            [selectedKw]: {
+              keyword: selectedKw,
+              paa: data.paa || [],
+              content: data.content,
+              status: 'success',
+              usedModel: 'cached',
+              duration
+            }
+          }));
+          setIsStreaming(false);
+          return;
+        }
+      }
+
+      // 處理串流響應
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let accumulatedContent = "";
+      let paaQuestions: string[] = [];
+
+      // 🔥 從 header 獲取 Base64 編碼的 PAA 問題
+      const paaHeaderBase64 = response.headers.get('X-PAA-Questions-Base64');
+      if (paaHeaderBase64) {
+        try {
+          // ✅ 正確的 UTF-8 Base64 解碼方法
+          const paaJson = decodeURIComponent(
+            atob(paaHeaderBase64)
+              .split('')
+              .map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+              .join('')
+          );
+          paaQuestions = JSON.parse(paaJson);
+          addLog(`📝 獲取 ${paaQuestions.length} 個 PAA 問題`);
+        } catch (e) {
+          console.error('Failed to decode PAA questions:', e);
+          addLog(`⚠️ PAA 問題解碼失敗`);
+        }
+      }
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          accumulatedContent += chunk;
+          setStreamingContent(accumulatedContent);
+        }
+      }
+
       const endTime = performance.now();
       const duration = Math.round(endTime - startTime);
 
-      setResults(prev => ({ 
-        ...prev, 
-        [selectedKw]: { ...result, duration } 
+      setResults(prev => ({
+        ...prev,
+        [selectedKw]: {
+          keyword: selectedKw,
+          paa: paaQuestions,
+          content: accumulatedContent,
+          status: 'success',
+          usedModel: selectedModel,
+          duration
+        }
       }));
 
-      if (result.status === 'success') {
-        addLog(`✅ [Success] ${selectedKw} 完成 (耗時: ${duration}ms)`);
-        // 更新使用次數
-        if (userUsage) {
-          setUserUsage(prev => prev ? { ...prev, usage_count: prev.usage_count + 1 } : null);
-        }
-      } else {
-        addLog(`❌ [Failed] ${selectedKw} 失敗: ${result.errorMessage}`);
+      addLog(`✅ [Success] ${selectedKw} 完成 (耗時: ${duration}ms)`);
+      
+      // 更新使用次數
+      if (userUsage) {
+        setUserUsage(prev => prev ? { ...prev, usage_count: prev.usage_count + 1 } : null);
       }
 
-    } catch (e: any) {
-      addLog(`❌ 系統錯誤: ${e.message}`);
+    } catch (e) {
+      const errorMsg = e instanceof Error ? e.message : '未知錯誤';
+      addLog(`❌ 系統錯誤: ${errorMsg}`);
     } finally {
-      setLoading(false);
+      setIsStreaming(false);
+      setStreamingContent("");
     }
   };
 
@@ -207,9 +425,10 @@ export default function GeoDashboard() {
         setUserUsage(prev => prev ? { ...prev, usage_count: prev.usage_count + 1 } : null);
       }
 
-    } catch (error: any) {
-      addLog(`❌ 微調失敗: ${error.message}`);
-      alert(error.message);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : '微調失敗';
+      addLog(`❌ 微調失敗: ${errorMessage}`);
+      alert(errorMessage);
     } finally {
       setIsRefining(false);
     }
@@ -282,6 +501,20 @@ export default function GeoDashboard() {
             </div>
           )}
           
+          {/* 自定義關鍵字說明 */}
+          {userUsage?.is_premium && (
+            <div className="bg-blue-900/30 border border-blue-700/50 rounded-lg p-3 text-xs">
+              <div className="flex items-center gap-2 text-blue-300 mb-1">
+                <span>★</span>
+                <span className="font-medium">自定義關鍵字</span>
+              </div>
+              <p className="text-blue-200/80">
+                帶有 ★ 標記的是您的自定義關鍵字<br />
+                滑鼠移到關鍵字上可刪除
+              </p>
+            </div>
+          )}
+          
           <div className="flex gap-2">
             <input 
               type="text" 
@@ -313,13 +546,33 @@ export default function GeoDashboard() {
           <div className="flex flex-col p-2 space-y-1">
             {filteredKeywords.map((kw) => {
               const res = results[kw];
+              const isCustom = userCustomKeywords.has(kw);
               return (
-                <button key={kw} onClick={() => setSelectedKw(kw)} className={`w-full text-left px-4 py-3 rounded-lg text-sm transition-all flex justify-between items-center ${selectedKw === kw ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400'}`}>
-                  <span className="truncate pr-4">{kw}</span>
-                  {res?.status === 'success' && <span className="w-2 h-2 rounded-full bg-green-400"></span>}
-                  {res?.status === 'error' && <span className="w-2 h-2 rounded-full bg-red-500"></span>}
-                  {loading && selectedKw === kw && !res && <span className="w-2 h-2 rounded-full bg-yellow-400 animate-ping"></span>}
-                </button>
+                <div key={kw} className="relative group">
+                  <button 
+                    onClick={() => setSelectedKw(kw)} 
+                    className={`w-full text-left px-4 py-3 rounded-lg text-sm transition-all flex justify-between items-center ${selectedKw === kw ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400'}`}
+                  >
+                    <span className="truncate pr-4">
+                      {isCustom && <span className="text-yellow-400 mr-1">★</span>}
+                      {kw}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      {res?.status === 'success' && <span className="w-2 h-2 rounded-full bg-green-400"></span>}
+                      {res?.status === 'error' && <span className="w-2 h-2 rounded-full bg-red-500"></span>}
+                      {isStreaming && selectedKw === kw && !res && <span className="w-2 h-2 rounded-full bg-yellow-400 animate-ping"></span>}
+                    </div>
+                  </button>
+                  {isCustom && (
+                    <button
+                      onClick={(e) => handleDeleteKeyword(kw, e)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-red-500 hover:bg-red-600 text-white text-xs px-2 py-1 rounded"
+                      title="刪除此關鍵字"
+                    >
+                      🗑️
+                    </button>
+                  )}
+                </div>
               );
             })}
           </div>
@@ -340,6 +593,19 @@ export default function GeoDashboard() {
             <h1 className="text-lg font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-700 to-indigo-600">GEO Analytics Dashboard</h1>
           </div>
           <div className="flex items-center gap-4">
+            {/* 歷史紀錄按鈕 */}
+            <button
+              onClick={() => {
+                setShowHistory(!showHistory);
+                if (!showHistory) {
+                  loadAnalysisHistory();
+                }
+              }}
+              className="px-4 py-2 bg-slate-600 text-white rounded-lg hover:bg-slate-700 transition-colors text-sm font-medium flex items-center gap-2"
+            >
+              📜 歷史紀錄
+            </button>
+            
             {/* 使用次數顯示 */}
             {userUsage && (
               <div className="text-xs text-right hidden sm:block">
@@ -362,9 +628,78 @@ export default function GeoDashboard() {
               </button>
             </div>
             
-            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold shadow-lg ${loading ? 'bg-yellow-500 animate-pulse' : 'bg-gradient-to-tr from-blue-500 to-purple-600'}`}>AI</div>
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold shadow-lg ${isStreaming ? 'bg-yellow-500 animate-pulse' : 'bg-gradient-to-tr from-blue-500 to-purple-600'}`}>AI</div>
           </div>
         </header>
+
+        {/* 🔥 歷史紀錄側邊欄 */}
+        {showHistory && (
+          <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowHistory(false)}>
+            <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[80vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
+              <div className="p-6 border-b border-slate-200 flex justify-between items-center">
+                <h2 className="text-2xl font-bold text-slate-800">📜 分析歷史紀錄</h2>
+                <button
+                  onClick={() => setShowHistory(false)}
+                  className="text-slate-400 hover:text-slate-600 text-2xl"
+                >
+                  ✕
+                </button>
+              </div>
+              
+              <div className="overflow-y-auto max-h-[calc(80vh-80px)] p-6">
+                {analysisHistory.length === 0 ? (
+                  <div className="text-center py-12 text-slate-400">
+                    <p className="text-lg mb-2">尚無分析紀錄</p>
+                    <p className="text-sm">執行 GEO 分析後，結果會顯示在這裡</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {analysisHistory.map((item) => (
+                      <div
+                        key={item.id}
+                        className="border border-slate-200 rounded-lg p-4 hover:border-blue-500 hover:shadow-md transition-all cursor-pointer"
+                        onClick={() => loadHistoryResult(item)}
+                      >
+                        <div className="flex justify-between items-start mb-2">
+                          <h3 className="font-bold text-slate-800 text-lg">{item.keyword}</h3>
+                          <span className="text-xs text-slate-400">
+                            {new Date(item.created_at).toLocaleDateString('zh-TW', {
+                              month: 'short',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit'
+                            })}
+                          </span>
+                        </div>
+                        
+                        {item.paa_questions && item.paa_questions.length > 0 && (
+                          <div className="mb-2">
+                            <p className="text-xs text-slate-500 mb-1">
+                              📝 {item.paa_questions.length} 個 PAA 問題
+                            </p>
+                            <p className="text-xs text-slate-600 line-clamp-2">
+                              {item.paa_questions[0]}
+                            </p>
+                          </div>
+                        )}
+                        
+                        <div className="text-xs text-slate-500 line-clamp-3">
+                          {item.geo_optimized_content?.substring(0, 150)}...
+                        </div>
+                        
+                        <div className="mt-3 flex justify-end">
+                          <span className="text-xs text-blue-600 font-medium">
+                            點擊載入 →
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="flex-1 overflow-y-auto p-6 md:p-10 scrollbar-thin scrollbar-thumb-slate-300">
           
@@ -395,6 +730,69 @@ export default function GeoDashboard() {
             <div className="text-center py-10 text-slate-400">請選擇關鍵字以開始分析</div>
           ) : (
             <div className="max-w-6xl mx-auto space-y-8 animate-fade-in">
+              
+              {/* 🔥 新增：進階設定區塊 */}
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                <button
+                  onClick={() => setShowAdvancedSettings(!showAdvancedSettings)}
+                  className="flex items-center justify-between w-full text-left"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg font-bold text-slate-800">⚙️ 進階設定</span>
+                    <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-full">選填</span>
+                  </div>
+                  <span className="text-slate-400">{showAdvancedSettings ? '▼' : '▶'}</span>
+                </button>
+
+                {showAdvancedSettings && (
+                  <div className="mt-6 space-y-6">
+                    {/* 自定義 Prompt */}
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        自定義 Prompt（選填）
+                      </label>
+                      <p className="text-xs text-slate-500 mb-3">
+                        💡 留空則使用系統預設的最佳實踐 Prompt。您可以在此調整語氣、風格或增加特殊要求。
+                      </p>
+                      <textarea
+                        value={customPrompt}
+                        onChange={(e) => setCustomPrompt(e.target.value)}
+                        placeholder={defaultPrompt}
+                        className="w-full h-48 px-4 py-3 border border-slate-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm font-mono"
+                      />
+                      <div className="flex justify-between items-center mt-2">
+                        <span className="text-xs text-slate-400">
+                          {customPrompt ? `已自定義 (${customPrompt.length} 字)` : '使用預設 Prompt'}
+                        </span>
+                        {customPrompt && (
+                          <button
+                            onClick={() => setCustomPrompt("")}
+                            className="text-xs text-blue-600 hover:text-blue-700"
+                          >
+                            重置為預設
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* 強制重新生成 */}
+                    <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-lg">
+                      <input
+                        type="checkbox"
+                        id="forceRefresh"
+                        checked={forceRefresh}
+                        onChange={(e) => setForceRefresh(e.target.checked)}
+                        className="w-4 h-4"
+                      />
+                      <label htmlFor="forceRefresh" className="text-sm text-slate-700 cursor-pointer">
+                        <span className="font-medium">強制重新生成</span>
+                        <span className="text-slate-500 ml-2">（不使用快取，會消耗 API 額度）</span>
+                      </label>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div className="flex justify-between items-end border-b border-slate-200 pb-6">
                 <div>
                    <h2 className="text-4xl font-extrabold text-slate-800">{selectedKw}</h2>
@@ -403,9 +801,30 @@ export default function GeoDashboard() {
                      <span className="text-sm text-slate-500">{currentResult?.status === 'success' ? `Analysis Complete (${currentResult.duration}ms)` : 'Ready'}</span>
                    </div>
                 </div>
-                <button onClick={handleAnalyze} disabled={loading} className={`px-8 py-3 rounded-xl font-bold text-sm shadow-lg text-white ${loading ? 'bg-slate-300' : 'bg-blue-600 hover:bg-blue-700'}`}>
-                  {loading ? "Processing..." : "🚀 執行 GEO 分析"}
-                </button>
+                <div className="flex items-center gap-4">
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xs font-medium text-slate-600">選擇 AI 模型</label>
+                    <select 
+                      value={selectedModel}
+                      onChange={(e) => setSelectedModel(e.target.value)}
+                      disabled={isStreaming}
+                      className="px-4 py-2 border border-slate-300 rounded-lg text-sm font-medium text-slate-700 bg-white hover:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {modelOptions.map(option => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <button 
+                    onClick={handleAnalyze} 
+                    disabled={isStreaming} 
+                    className={`px-8 py-3 rounded-xl font-bold text-sm shadow-lg text-white mt-6 ${isStreaming ? 'bg-slate-300' : 'bg-blue-600 hover:bg-blue-700'}`}
+                  >
+                    {isStreaming ? "⚡ 生成中..." : "🚀 執行 GEO 分析"}
+                  </button>
+                </div>
               </div>
 
               {currentResult && currentResult.status === 'success' && (
@@ -510,7 +929,22 @@ export default function GeoDashboard() {
                       )}
 
                       <article className="prose prose-slate prose-lg max-w-none">
-                        <div className="whitespace-pre-wrap font-sans text-base leading-relaxed">{currentResult.content}</div>
+                        {isStreaming && streamingContent ? (
+                          <div className="relative">
+                            <div className="absolute top-0 right-0 flex items-center gap-2 text-xs text-blue-600 bg-blue-50 px-3 py-1 rounded-full">
+                              <span className="animate-pulse">⚡</span>
+                              <span>即時生成中...</span>
+                            </div>
+                            <div className="whitespace-pre-wrap font-sans text-base leading-relaxed pt-8">
+                              {streamingContent}
+                              <span className="inline-block w-2 h-5 bg-blue-600 animate-pulse ml-1"></span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="whitespace-pre-wrap font-sans text-base leading-relaxed">
+                            {currentResult.content}
+                          </div>
+                        )}
                       </article>
                     </div>
                   </div>
