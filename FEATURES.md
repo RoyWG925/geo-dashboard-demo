@@ -94,7 +94,7 @@ NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
 
 # Google AI
-GOOGLE_GENERATIVE_AI_API_KEY=AIzaSyBnjuMLlwXXj_pGhWTWYHk56m8KQ5IpC2Q
+GOOGLE_GENERATIVE_AI_API_KEY=your_google_api_key_here
 
 # Apify
 APIFY_API_TOKEN=your_apify_token
