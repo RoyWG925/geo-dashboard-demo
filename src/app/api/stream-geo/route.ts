@@ -25,8 +25,11 @@ export async function POST(request: NextRequest) {
 
     const usedModel = selectedModel || 'gemini-2.5-flash';
 
+    // 🔥 修復：如果使用自定義 Prompt，應該跳過快取
+    const shouldUseCache = !forceRefresh && !customPrompt;
+
     // 檢查快取
-    if (!forceRefresh) {
+    if (shouldUseCache) {
       const { data: cachedResult } = await supabase
         .from('geo_analysis_results')
         .select('*')
@@ -139,7 +142,34 @@ export async function POST(request: NextRequest) {
       請按照上述格式撰寫內容：
     `;
 
-    const finalPrompt = customPrompt || defaultPrompt;
+    // 🔥 修復：如果使用自定義 Prompt，需要將關鍵字和 PAA 數據注入到自定義 Prompt 中
+    let finalPrompt: string;
+    if (customPrompt) {
+      // 用戶自定義 Prompt，但仍需包含關鍵字和 PAA 數據
+      finalPrompt = `
+        你是一個專業的內容創作專家。
+
+        **任務目標：**
+        為關鍵字「${keyword}」撰寫內容。
+
+        **用戶搜尋意圖參考（必須參考這些真實用戶問題）：**
+        ${paaContext}
+
+        **用戶自定義要求：**
+        ${customPrompt}
+
+        **基本要求：**
+        - **語言：** 繁體中文（台灣）
+        - **格式：** 使用 Markdown
+        - **內容：** 必須回答關鍵字「${keyword}」相關的問題
+        - **參考：** 必須參考上述的用戶搜尋意圖（PAA 問題）
+
+        請按照用戶自定義要求撰寫內容：
+      `;
+    } else {
+      // 使用預設 Prompt
+      finalPrompt = defaultPrompt;
+    }
 
     // 🔥 使用 streamText 進行串流輸出
     const result = streamText({
